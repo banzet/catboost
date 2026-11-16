@@ -1,6 +1,76 @@
 <?php
-// --- PARTIE BACK-END / API PHP & SQLite ---
+// --- PARTIE BACK-END / API PHP & SQLite & SYNCHRO GITHUB ---
 $dbFile = __DIR__ . '/catboost.sqlite';
+
+// Restauration automatique depuis GitHub si la base SQLite locale est absente (redémarrage Render)
+function restoreBackupFromGitHub() {
+    global $dbFile;
+    $token = getenv('GITHUB_TOKEN');
+    $repo  = getenv('GITHUB_REPO');
+    if (!$token || !$repo || file_exists($dbFile)) return;
+
+    $url = "https://api.github.com/repos/{$repo}/contents/backup_catboost.sqlite";
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            "Authorization: Bearer {$token}",
+            "User-Agent: Render-PHP-App",
+            "Accept: application/vnd.github.v3+json"
+        ]
+    ]);
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($httpCode === 200) {
+        $data = json_decode($response, true);
+        if (!empty($data['content'])) {
+            file_put_contents($dbFile, base64_decode($data['content']));
+        }
+    }
+}
+
+// Sauvegarde silencieuse automatique de la base SQLite sur GitHub
+function syncBackupToGitHub() {
+    global $dbFile;
+    $token = getenv('GITHUB_TOKEN');
+    $repo  = getenv('GITHUB_REPO');
+    if (!$token || !$repo || !file_exists($dbFile)) return;
+
+    $url = "https://api.github.com/repos/{$repo}/contents/backup_catboost.sqlite";
+    $headers = [
+        "Authorization: Bearer {$token}",
+        "User-Agent: Render-PHP-App",
+        "Accept: application/vnd.github.v3+json",
+        "Content-Type: application/json"
+    ];
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HTTPHEADER => $headers]);
+    $res = json_decode(curl_exec($ch), true);
+    curl_close($ch);
+    $sha = $res['sha'] ?? null;
+
+    $payload = [
+        'message' => 'Auto-backup SQLite : ' . date('Y-m-d H:i:s'),
+        'content' => base64_encode(file_get_contents($dbFile))
+    ];
+    if ($sha) $payload['sha'] = $sha;
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CUSTOMREQUEST  => 'PUT',
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_HTTPHEADER     => $headers
+    ]);
+    curl_exec($ch);
+    curl_close($ch);
+}
+
+// Tenter de restaurer la base au premier chargement si absente
+restoreBackupFromGitHub();
 
 try {
     $db = new PDO('sqlite:' . $dbFile);
@@ -94,6 +164,7 @@ if (isset($_GET['action'])) {
                 foreach ($input['participants'] as $p) {
                     $stmtIns->execute([$p['nom'], $p['prenom'], $p['statut'], json_encode($p['tickets'])]);
                 }
+                syncBackupToGitHub(); // Sauvegarde auto transparente
                 echo json_encode(['success' => true]);
                 exit;
             }
@@ -110,6 +181,7 @@ if (isset($_GET['action'])) {
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($row && trim($row['value']) === trim($input['password'])) {
                 $db->exec("DELETE FROM participants");
+                syncBackupToGitHub(); // Sauvegarde auto transparente
                 echo json_encode(['success' => true]);
                 exit;
             }
@@ -128,6 +200,7 @@ if (isset($_GET['action'])) {
                 $sizeVal = max(15, min(50, intval($input['size'])));
                 $stmtSize = $db->prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('wheel_center_size', ?)");
                 $stmtSize->execute([$sizeVal]);
+                syncBackupToGitHub(); // Sauvegarde auto transparente
                 echo json_encode(['success' => true]);
                 exit;
             }
@@ -139,7 +212,6 @@ if (isset($_GET['action'])) {
     if ($action === 'record_winner') {
         $input = json_decode(file_get_contents('php://input'), true);
         if (isset($input['ticketNum'])) {
-            // AJOUT : Retrouver le participant associé au ticket
             $winnerLabel = 'Inconnu';
             $parts = $db->query("SELECT * FROM participants")->fetchAll(PDO::FETCH_ASSOC);
             foreach ($parts as $p) {
@@ -152,12 +224,13 @@ if (isset($_GET['action'])) {
 
             $nowFormatted = date('d/m/Y H:i:s');
             $stmt = $db->prepare("INSERT INTO history (date, ticketNum, statut) VALUES (?, ?, ?)");
-            $stmt->execute([$nowFormatted, $input['ticketNum'], $winnerLabel]); // Remplace 'Anonyme (Ticket)' par $winnerLabel
+            $stmt->execute([$nowFormatted, $input['ticketNum'], $winnerLabel]);
 
             $spinPayload = json_encode(['ticketNum' => $input['ticketNum'], 'timestamp' => microtime(true)]);
             $stmtSpin = $db->prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('active_spin', ?)");
             $stmtSpin->execute([$spinPayload]);
 
+            syncBackupToGitHub(); // Sauvegarde auto transparente après tirage
             echo json_encode(['success' => true]);
             exit;
         }
@@ -173,6 +246,7 @@ if (isset($_GET['action'])) {
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($row && trim($row['value']) === trim($input['password'])) {
                 $db->exec("DELETE FROM settings WHERE key = 'active_spin'");
+                syncBackupToGitHub();
                 echo json_encode(['success' => true]);
                 exit;
             }
@@ -189,6 +263,7 @@ if (isset($_GET['action'])) {
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($row && trim($row['value']) === trim($input['password'])) {
                 $db->exec("DELETE FROM history");
+                syncBackupToGitHub(); // Sauvegarde auto transparente
                 echo json_encode(['success' => true]);
                 exit;
             }
@@ -206,6 +281,7 @@ if (isset($_GET['action'])) {
             if ($row && trim($row['value']) === trim($input['old_password'])) {
                 $upd = $db->prepare("UPDATE settings SET value = ? WHERE key = 'password'");
                 $upd->execute([trim($input['new_password'])]);
+                syncBackupToGitHub(); // Sauvegarde auto transparente
                 echo json_encode(['success' => true]);
                 exit;
             }
@@ -213,7 +289,7 @@ if (isset($_GET['action'])) {
         echo json_encode(['success' => false]);
         exit;
     }
-// AJOUT : Action pour supprimer un élément d'historique spécifique
+
     if ($action === 'delete_history_item') {
         $input = json_decode(file_get_contents('php://input'), true);
         if (isset($input['password']) && isset($input['id'])) {
@@ -223,6 +299,7 @@ if (isset($_GET['action'])) {
             if ($row && trim($row['value']) === trim($input['password'])) {
                 $del = $db->prepare("DELETE FROM history WHERE id = ?");
                 $del->execute([$input['id']]);
+                syncBackupToGitHub(); // Sauvegarde auto transparente
                 echo json_encode(['success' => true]);
                 exit;
             }
@@ -307,7 +384,7 @@ if (isset($_GET['action'])) {
                     </div>
                     <div>
                         <h1 class="text-lg sm:text-2xl font-black tracking-tight text-white">CAT'Boost du pouvoir d'achat</h1>
-                        <p class="text-[11px] sm:text-xs text-cat-lightblue font-medium">Le lirage au sort officiel</p>
+                        <p class="text-[11px] sm:text-xs text-cat-lightblue font-medium">Le tirage au sort officiel</p>
                     </div>
                 </div>
             </div>
@@ -448,13 +525,13 @@ if (isset($_GET['action'])) {
                     </button>
                 </div>
                 <div class="overflow-x-auto rounded-xl border border-slate-200">
-                    <table class="w-full text-left border-collapse text-xs sm:text-sm min-w-[500px]"> <!-- min-w ajusté à 500px -->
+                    <table class="w-full text-left border-collapse text-xs sm:text-sm min-w-[500px]">
                         <thead>
                             <tr class="bg-cat-lightbg text-slate-700 font-bold border-b border-slate-200">
                                 <th class="p-3">Date & Heure</th>
                                 <th class="p-3">Ticket Gagnant</th>
-                                <th class="p-3">Participant Gagnant</th> <!-- MODIFIÉ -->
-                                <th class="p-3 text-right">Actions</th>      <!-- AJOUTÉ -->
+                                <th class="p-3">Participant Gagnant</th>
+                                <th class="p-3 text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody id="historyTableBody" class="divide-y divide-slate-100"></tbody>
@@ -525,10 +602,9 @@ if (isset($_GET['action'])) {
         let currentRotation = 0;
         let lastLiveTimestamp = null;
         let lastDataHash = '';
-		let pendingHistoryIdToDelete = null;
+        let pendingHistoryIdToDelete = null;
 
         const centerLogo = new Image();
-        // S'assure que le dessin se relance proprement lorsque l'image du logo est chargée
         centerLogo.onload = function() {
             drawWheel();
         };
@@ -704,9 +780,9 @@ if (isset($_GET['action'])) {
                     else if (pendingAction === 'spin') startSpinProcess();
                     else if (pendingAction === 'save_size') saveCenterSizeRequest();
                     else if (pendingAction === 'clear_all') executeClearAllParticipants();
-					else if (pendingAction === 'delete_history_item') executeDeleteHistoryItem(pendingHistoryIdToDelete);
+                    else if (pendingAction === 'delete_history_item') executeDeleteHistoryItem(pendingHistoryIdToDelete);
                 } else {
-                    document.getElementById('passwordError').classList.add('hidden');
+                    document.getElementById('passwordError').classList.remove('hidden');
                 }
             });
         }
@@ -1109,7 +1185,7 @@ if (isset($_GET['action'])) {
             drawWheel();
         }
 
-function renderHistoryTable() {
+        function renderHistoryTable() {
             const tbody = document.getElementById('historyTableBody');
             if (!tbody) return;
             tbody.innerHTML = '';
@@ -1122,7 +1198,7 @@ function renderHistoryTable() {
                 tr.innerHTML = `
                     <td class="p-3 text-slate-600 font-medium">${item.date}</td>
                     <td class="p-3 font-black text-cat-darkblue text-sm sm:text-base">N° ${item.ticketNum}</td>
-                    <td class="p-3 font-semibold text-slate-700">${item.statut}</td> <!-- Affiche le nom/prénom stocké -->
+                    <td class="p-3 font-semibold text-slate-700">${item.statut}</td>
                     <td class="p-3 text-right">
                         <button onclick="deleteHistoryItem(${item.id})" class="text-red-600 hover:text-red-900 font-semibold text-xs bg-red-50 hover:bg-red-100 px-2.5 py-1.5 rounded-lg transition">Supprimer</button>
                     </td>
@@ -1150,7 +1226,8 @@ function renderHistoryTable() {
                 });
             }
         }
-		function deleteHistoryItem(id) {
+
+        function deleteHistoryItem(id) {
             if (!confirm("Voulez-vous supprimer cette ligne de l'historique ?")) return;
 
             if (!isAuthenticated) {
