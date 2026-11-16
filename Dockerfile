@@ -18,5 +18,5 @@ RUN sed -i 's/80/10000/g' /etc/apache2/ports.conf /etc/apache2/sites-available/0
 # Copier les fichiers du projet
 COPY . /var/www/html/
 
-# Donner les droits complets à Apache sur le dossier web
-RUN chown -www-data:www-data /var/www/html && chmod -R 755 /var/www/html
+# Donner les droits complets à Apache sur le dossier web (CORRIGÉ ici)
+RUN chown -R www-data:www-data /var/www/html && chmod -R 755 /var/www/html
